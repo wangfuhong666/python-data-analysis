@@ -1,0 +1,64 @@
+name: Sync from Gitee
+
+# 反向同步：定时把 Gitee 上领先的分支快进拉取回 GitHub。
+# 用途是覆盖「直接在 Gitee 网页上改代码 / 在 Gitee 上建分支」的情况。
+# 同样只做快进，绝不 force push；两端分叉时点名是哪个分支并让工作流失败。
+on:
+  schedule:
+    # 每 15 分钟检查一次（GitHub 的高峰期可能略有延迟）
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-gitee
+  cancel-in-progress: false
+
+env:
+  GITEE_USER: wang_fuhong
+  GITEE_REPO: python-data-analysis
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出全部历史（含所有分支与标签）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 把 Gitee 上领先的分支快进同步回 GitHub
+        run: |
+          set -uo pipefail
+
+          git remote add gitee "https://gitee.com/${GITEE_USER}/${GITEE_REPO}.git"
+          git fetch gitee "+refs/heads/*:refs/remotes/gitee/*" --tags --prune
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          failed=0
+          for br in $(git for-each-ref --format='%(refname:strip=3)' refs/remotes/gitee | grep -vx 'HEAD' || true); do
+            echo "::group::分支 ${br}"
+            gitee_sha="$(git rev-parse "refs/remotes/gitee/${br}")"
+
+            if ! git rev-parse --verify --quiet "refs/remotes/origin/${br}" >/dev/null; then
+              echo "GitHub 上还没有 ${br}，创建该分支"
+              git push origin "refs/remotes/gitee/${br}:refs/heads/${br}" || failed=1
+            elif [ "${gitee_sha}" = "$(git rev-parse "refs/remotes/origin/${br}")" ]; then
+              echo "✅ ${br} 两端已一致"
+            elif git merge-base --is-ancestor "refs/remotes/origin/${br}" "${gitee_sha}"; then
+              echo "GitHub 落后于 Gitee，快进推送 ${br}"
+              git push origin "refs/remotes/gitee/${br}:refs/heads/${br}" || failed=1
+            elif git merge-base --is-ancestor "${gitee_sha}" "refs/remotes/origin/${br}"; then
+              echo "✅ ${br} GitHub 领先（会由 Sync to Gitee 推过去）"
+            else
+              echo "::error::分支 ${br} 两端已分叉，本工作流不会覆盖任何一边，请手动对齐。"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+
+          exit ${failed}
